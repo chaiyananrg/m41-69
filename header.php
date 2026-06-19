@@ -3,13 +3,16 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// 🔌 ทำการดึงตัวเชื่อมต่อฐานข้อมูลหลักขยับขึ้น 1 ชั้นโฟลเดอร์ (หากยังไม่มีการเรียกใช้)
+// 🔌 ทำการดึงตัวเชื่อมต่อฐานข้อมูลหลักขยับขึ้น 1 ชั้นโฟลเดอร์ (หากยังไม่มี)
 require_once __DIR__ . '/../db.php';
 
 // 👤 ตั้งค่าเริ่มต้นเพื่อความปลอดภัย (Fallback Parameters)
 $user_display_name = 'ผู้ใช้งานระบบ';
 $user_profile_img  = ''; 
 $is_admin_user     = false;
+$is_teacher_user   = false;
+$teacher_level     = 0;
+$allowed_admin_pages = [];
 
 // 🔍 ค้นหาข้อมูลผู้ใช้และจำแนกสิทธิ์สดตรงจาก Database MySQL
 if (isset($_SESSION['user_id'])) {
@@ -27,23 +30,77 @@ if (isset($_SESSION['user_id'])) {
             $is_admin_user     = true;
             $_SESSION['role']  = 'Admin'; // ล็อคบทบาทเพื่อใช้ในสิทธิ์หน้าอื่นๆ
         } else {
-            // 🎓 ขั้นที่ 2: หากไม่มีรหัสในตารางแอดมินหลัก ให้มาตรวจที่ตารางนักเรียน (students)
-            $stmt_student = $conn->prepare("SELECT fullname, role, profile_img FROM students WHERE student_id = :uid LIMIT 1");
-            $stmt_student->bindParam(':uid', $session_uid);
-            $stmt_student->execute();
-            $student_data = $stmt_student->fetch(PDO::FETCH_ASSOC);
-            
-            if ($student_data) {
-                $user_display_name = $student_data['fullname'];
-                $user_profile_img  = $student_data['profile_img'] ?? '';
+            // 🎓 ขั้นที่ 2: ตรวจสอบจากตาราง teachers (หากรหัสขึ้นต้นด้วย T)
+            if (substr($session_uid, 0, 1) === 'T') {
+                $stmt_teacher = $conn->prepare("SELECT fullname, subject, profile_img, role FROM teachers WHERE teacher_id = :uid LIMIT 1");
+                $stmt_teacher->bindParam(':uid', $session_uid);
+                $stmt_teacher->execute();
+                $teacher_data = $stmt_teacher->fetch(PDO::FETCH_ASSOC);
                 
-                // ตรวจสอบค่าคอลัมน์ role ในตาราง students เพิ่มเติม (เช่น 'Admin' หรือ 'User')
-                if (isset($student_data['role']) && strtolower(trim($student_data['role'])) === 'admin') {
-                    $is_admin_user    = true;
-                    $_SESSION['role'] = 'Admin';
+                if ($teacher_data) {
+                    $user_display_name = $teacher_data['fullname'];
+                    $user_profile_img  = $teacher_data['profile_img'] ?? '';
+                    $is_teacher_user   = true;
+                    $_SESSION['is_teacher'] = true;
+                    $_SESSION['role']  = 'Teacher';
+                    
+                    // ✅ ดึงสิทธิ์จากตาราง physics_permissions
+                    try {
+                        $stmt_perm = $conn->prepare("SELECT admin_level, allowed_pages FROM physics_permissions WHERE user_id = :uid LIMIT 1");
+                        $stmt_perm->bindParam(':uid', $session_uid);
+                        $stmt_perm->execute();
+                        $perm_data = $stmt_perm->fetch(PDO::FETCH_ASSOC);
+                        
+                        if ($perm_data && $perm_data['admin_level'] >= 5) {
+                            $is_admin_user = true; // ระดับ 5+ ถือว่าเป็นผู้ดูแลระบบเสริม
+                            $_SESSION['role'] = 'Admin';
+                            $teacher_level = $perm_data['admin_level'];
+                            
+                            // ✅ 解析允许的页面列表 (หากมี)
+                            if (!empty($perm_data['allowed_pages'])) {
+                                $allowed_admin_pages = explode(',', $perm_data['allowed_pages']);
+                                $allowed_admin_pages = array_map('trim', $allowed_admin_pages);
+                            }
+                        }
+                    } catch (Exception $e) {}
                 } else {
-                    $is_admin_user    = false;
-                    $_SESSION['role'] = 'Student';
+                    // ↪️ หากไม่พบในตาราง teachers แต่รหัสเริ่มด้วย T ให้ถือว่าเป็นนักเรียน
+                    $stmt_student = $conn->prepare("SELECT fullname, role, profile_img FROM students WHERE student_id = :uid LIMIT 1");
+                    $stmt_student->bindParam(':uid', $session_uid);
+                    $stmt_student->execute();
+                    $student_data = $stmt_student->fetch(PDO::FETCH_ASSOC);
+                    
+                    if ($student_data) {
+                        $user_display_name = $student_data['fullname'];
+                        $user_profile_img  = $student_data['profile_img'] ?? '';
+                        
+                        if (isset($student_data['role']) && strtolower(trim($student_data['role'])) === 'admin') {
+                            $is_admin_user    = true;
+                            $_SESSION['role'] = 'Admin';
+                        } else {
+                            $_SESSION['role'] = 'Student';
+                        }
+                    }
+                }
+            } else {
+                // 🎓 ขั้นที่ 3: หากไม่มีรหัสในตารางแอดมินหลัก ให้มาตรวจที่ตารางนักเรียน
+                $stmt_student = $conn->prepare("SELECT fullname, role, profile_img FROM students WHERE student_id = :uid LIMIT 1");
+                $stmt_student->bindParam(':uid', $session_uid);
+                $stmt_student->execute();
+                $student_data = $stmt_student->fetch(PDO::FETCH_ASSOC);
+                
+                if ($student_data) {
+                    $user_display_name = $student_data['fullname'];
+                    $user_profile_img  = $student_data['profile_img'] ?? '';
+                    
+                    // ตรวจสอบค่าคอลัมน์ role ในตาราง students เพิ่มเติม (เช่น 'Admin' หรือ 'User')
+                    if (isset($student_data['role']) && strtolower(trim($student_data['role'])) === 'admin') {
+                        $is_admin_user    = true;
+                        $_SESSION['role'] = 'Admin';
+                    } else {
+                        $is_admin_user    = false;
+                        $_SESSION['role'] = 'Student';
+                    }
                 }
             }
         }
@@ -51,6 +108,7 @@ if (isset($_SESSION['user_id'])) {
         // กรณีเชื่อมต่อฐานข้อมูลขัดข้อง ให้ใช้ค่าความทรงจำ Session เดิมไปก่อน
         $user_display_name = $_SESSION['user_name'] ?? 'ผู้ใช้งานระบบ';
         $is_admin_user     = (isset($_SESSION['role']) && $_SESSION['role'] === 'Admin');
+        $is_teacher_user   = isset($_SESSION['is_teacher']) && $_SESSION['is_teacher'];
     }
 }
 
@@ -99,6 +157,13 @@ foreach ($dir_files as $file) {
 function sort_my_header_menus($a, $b) { return strnatcmp($a['order'], $b['order']); }
 usort($student_menus, 'sort_my_header_menus');
 usort($admin_menus, 'sort_my_header_menus');
+
+// 🛡️ กรองเมนูแอดมินสำหรับครูตามสิทธิ์ (physics_permissions)
+if ($is_teacher_user && !empty($allowed_admin_pages)) {
+    $admin_menus = array_filter($admin_menus, function($item) use ($allowed_admin_pages) {
+        return in_array($item['link'], $allowed_admin_pages);
+    });
+}
 ?>
 
 <!-- 🎨 สไตล์หลักสแกนหน้าแบบ Luxury Light (Apple Studio Style) -->
@@ -111,6 +176,7 @@ usort($admin_menus, 'sort_my_header_menus');
     .premium-blur { backdrop-filter: blur(24px); background-color: rgba(255, 255, 255, 0.82); }
     .active-pill { background-color: #171717; color: #ffffff; }
     .admin-pill { background-color: #f59e0b; color: #ffffff; } /* แอดมินสไตล์ปุ่มสีทองแอมเบอร์พรีเมียม */
+    .teacher-badge { background-color: #8b5cf6; color: #ffffff; } /* บัตรครูสีม่วง */
 </style>
 
 <!-- 🧭 แถบเมนูหลัก Header Shell -->
@@ -118,8 +184,8 @@ usort($admin_menus, 'sort_my_header_menus');
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex items-center justify-between h-16">
             
-            <!-- 👤 ส่วนข้อมูลผู้ใช้ (รูปโปรไฟล์อวาตาร์ + ชื่อและระดับสิทธิ์ ดึงสดจาก SQL) -->
-            <div class="flex items-center gap-3 bg-neutral-50 border border-neutral-200/40 pl-2 pr-4 py-1.5 rounded-full shadow-[0_2px_10px_rgba(0,0,0,0.01)] hover:bg-neutral-100/40 transition duration-300">
+            <!-- 👤 ส่วนข้อมูลผู้ใช้ (รูปโปรไฟล์อวาตาร์ + ชื่อและระดับสิทธิ์ ดึงสดตรง) -->
+            <div class="flex items-center gap-3 bg-neutral-50 border border-neutral-200/40 pl-2 pr-4 py-1.5 rounded-full shadow-[0_2px_10px_rgba(0,0,0,0.01)] hover:bg-neutral-100/40 transition duration-200">
                 <div class="relative flex-shrink-0">
                     <?php if (!empty($user_profile_img) && filter_var($user_profile_img, FILTER_VALIDATE_URL)): ?>
                         <!-- แสดงรูปจริงกรณีผู้ใช้อัปโหลดลงในระบบ -->
@@ -130,13 +196,43 @@ usort($admin_menus, 'sort_my_header_menus');
                             <i data-lucide="user" class="w-4 h-4"></i>
                         </div>
                     <?php endif; ?>
-                    <!-- จุดบอกสถานะผู้ใช้ (แอดมินจะกะพริบแสงไฟสีส้มเหลือง) -->
-                    <span class="absolute bottom-0 right-0 block h-2 w-2 rounded-full <?php echo $is_admin_user ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'; ?> ring-2 ring-white"></span>
+                    <!-- จุดบอกสถานะผู้ใช้ (แอดมินจะกะพริบแสงไฟสีส้มเหลือง, ครูจะเป็นสีม่วง) -->
+                    <span class="absolute bottom-0 right-0 block h-2 w-2 rounded-full <?php 
+                        if ($is_admin_user && $is_teacher_user) {
+                            echo 'bg-purple-500 animate-pulse'; // ครูที่มีสิทธิ์แอดมิน
+                        } elseif ($is_admin_user) {
+                            echo 'bg-amber-500 animate-pulse'; // แอดมิน
+                        } elseif ($is_teacher_user) {
+                            echo 'bg-indigo-500'; // ครู
+                        } else {
+                            echo 'bg-emerald-500'; // นักเรียน
+                        }
+                    ?> ring-2 ring-white"></span>
                 </div>
                 
                 <div class="flex flex-col text-left">
-                    <span class="text-[9px] font-bold tracking-wider uppercase leading-none mb-0.5 <?php echo $is_admin_user ? 'text-amber-600' : 'text-neutral-400'; ?>">
-                        <?php echo $is_admin_user ? '👑 Administrator' : '🎓 Student'; ?>
+                    <span class="text-[9px] font-bold tracking-wider uppercase leading-none mb-0.5 <?php 
+                        if ($is_admin_user && $is_teacher_user) {
+                            echo 'text-purple-600'; // ครูที่มีสิทธิ์แอดมิน
+                        } elseif ($is_admin_user) {
+                            echo 'text-amber-600'; // แอดมิน
+                        } elseif ($is_teacher_user) {
+                            echo 'text-indigo-600'; // ครู
+                        } else {
+                            echo 'text-neutral-400'; // นักเรียน
+                        }
+                    ?>">
+                        <?php 
+                            if ($is_admin_user && $is_teacher_user) {
+                                echo '👑 Teacher Admin';
+                            } elseif ($is_admin_user) {
+                                echo '👑 Administrator';
+                            } elseif ($is_teacher_user) {
+                                echo '🎓 Teacher';
+                            } else {
+                                echo '🎓 Student';
+                            }
+                        ?>
                     </span>
                     <span class="text-xs font-semibold text-neutral-800 tracking-tight leading-tight max-w-[130px] truncate">
                         <?php echo htmlspecialchars($user_display_name); ?>
@@ -152,14 +248,14 @@ usort($admin_menus, 'sort_my_header_menus');
                         $isActive = ($current_page_clean === $item['link']);
                     ?>
                         <!-- 🔗 URL ตรงแบบไม่มีนามสกุลไฟล์ .php -->
-                        <a href="<?php echo $item['link']; ?>" class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all duration-300 <?php echo $isActive ? 'active-pill shadow-[0_4px_12px_rgba(0,0,0,0.06)]' : 'text-neutral-500 hover:text-neutral-900 hover:bg-white/50'; ?>">
+                        <a href="<?php echo $item['link']; ?>" class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all duration-300 <?php echo $isActive ? 'bg-neutral-900 text-white shadow-md' : 'text-neutral-600 hover:text-neutral-900 hover:bg-white'; ?>">
                             <i data-lucide="<?php echo $item['icon']; ?>" class="w-3.5 h-3.5"></i>
                             <?php echo $item['title']; ?>
                         </a>
                     <?php endforeach; ?>
                 </nav>
 
-                <!-- 👑 แท็บเมนูควบคุมสำหรับผู้ดูแลระบบ (Admin) จะแสดงเฉพาะเมื่อผู้ใช้ล็อกอินนั้นเป็นแอดมินจริง -->
+                <!-- 👑 แท็บเมนูควบคุมสำหรับผู้ดูแลระบบ (Admin) จะแสดงเฉพาะเมื่อผู้ใช้มีสิทธิ์ -->
                 <?php if ($is_admin_user && !empty($admin_menus)): ?>
                     <div class="h-4 w-px bg-neutral-200"></div> 
                     <nav class="flex items-center gap-1 bg-amber-50/60 p-1 rounded-xl border border-amber-100/50 animate-fade-in">
@@ -167,7 +263,7 @@ usort($admin_menus, 'sort_my_header_menus');
                             $isActive = ($current_page_clean === $item['link']);
                         ?>
                             <!-- 🔗 URL ตรงแบบไม่มีนามสกุลไฟล์ .php -->
-                            <a href="<?php echo $item['link']; ?>" class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all duration-300 <?php echo $isActive ? 'admin-pill shadow-[0_4px_12px_rgba(245,158,11,0.18)]' : 'text-amber-700 hover:text-amber-900 hover:bg-white/60'; ?>">
+                            <a href="<?php echo $item['link']; ?>" class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all duration-300 <?php echo $isActive ? 'bg-amber-500 text-white shadow-md' : 'text-amber-700 hover:text-amber-900 hover:bg-amber-100'; ?>">
                                 <i data-lucide="<?php echo $item['icon']; ?>" class="w-3.5 h-3.5"></i>
                                 <?php echo $item['title']; ?>
                             </a>
@@ -204,7 +300,7 @@ usort($admin_menus, 'sort_my_header_menus');
                 $isActive = ($current_page_clean === $item['link']);
             ?>
                 <!-- 🔗 URL ตรงแบบไม่มีนามสกุลไฟล์ .php -->
-                <a href="<?php echo $item['link']; ?>" class="flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition-all <?php echo $isActive ? 'bg-neutral-900 text-white shadow-sm' : 'text-neutral-600 hover:bg-neutral-50'; ?>">
+                <a href="<?php echo $item['link']; ?>" class="flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition-all <?php echo $isActive ? 'bg-neutral-900 text-white shadow-md' : 'text-neutral-700 hover:bg-neutral-100'; ?>">
                     <i data-lucide="<?php echo $item['icon']; ?>" class="w-4 h-4"></i>
                     <?php echo $item['title']; ?>
                 </a>
@@ -216,8 +312,8 @@ usort($admin_menus, 'sort_my_header_menus');
                 <?php foreach ($admin_menus as $item): 
                     $isActive = ($current_page_clean === $item['link']);
                 ?>
-                    <!-- 🔗 URL ตรงแบบไม่มีนามสกุลไฟล์ .php -->
-                    <a href="<?php echo $item['link']; ?>" class="flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition-all <?php echo $isActive ? 'bg-amber-500 text-white shadow-sm' : 'text-amber-600 hover:bg-amber-50'; ?>">
+                    <!-- 🔗 URL ตรง��บบไม่มีนามสกุลไฟล์ .php -->
+                    <a href="<?php echo $item['link']; ?>" class="flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition-all <?php echo $isActive ? 'bg-amber-500 text-white shadow-md' : 'text-amber-700 hover:bg-amber-50'; ?>">
                         <i data-lucide="<?php echo $item['icon']; ?>" class="w-4 h-4"></i>
                         <?php echo $item['title']; ?>
                     </a>
